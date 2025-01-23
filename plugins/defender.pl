@@ -8,19 +8,23 @@
 #
 #
 # Change history:
+#   20250114 - updated output of detection events
+#   20240807 - updated to include feature disabled events
+#   20240610 - added event ID 1119 parsing, extracted files from 1116/1117/1119 events
+#   20240112 - added event ID 5013 parsing
 #   20230802 - added check for 2050 events
 #   20230503 - created
 #
 # References:
 #   https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/troubleshoot-microsoft-defender-antivirus?view=o365-worldwide
 #
-# copyright 2023 Quantum Analytics Research, LLC
+# copyright 2025 Quantum Analytics Research, LLC
 # author: H. Carvey, keydet89@yahoo.com
 #-----------------------------------------------------------
 package defender;
 use strict;
 
-my %config = (version       => 20230802,
+my %config = (version       => 20250114,
               category      => "",
               MITRE         => "");
 
@@ -43,7 +47,12 @@ sub pluginmain {
 	my %detections = ();
 	my %files      = ();
 	my %changes    = ();
+	my %disabled   = ();
 	my %submit     = ();
+	my %tamper     = ();
+	my %failed     = ();
+	my %files_1116 = ();
+	my %files_1119 = ();
 	
 	open(FH,'<',$file);
 	while (<FH>) {
@@ -59,8 +68,16 @@ sub pluginmain {
 			if ($id eq "1116" || $id eq "1117") {
 		
 				my @s = split(/,/,$str);
-				$detections{$tags[0]} = $id.": ".$s[7];
+				push(@{$detections{$tags[0]}},$id.": ".$s[7]);
+				$files_1116{$s[21]} = 1;
 			
+			}
+# added 20240610			
+			elsif ($id eq "1119") {
+				my @s = split(/,/,$str);
+				$failed{$tags[0]} = $id.": ".$s[7];
+				$files_1119{$s[21]} = 1;
+				
 			}
 # added 20230802			
 			elsif ($id eq "2050") {
@@ -74,9 +91,29 @@ sub pluginmain {
 				my $str = $tags[0]."|".$s[2]."|".$s[3];
 				$files{$str} = 1;
 			}
+			elsif ($id eq "5013") {
+				my @s = split(/,/,$str);
+				$tamper{$tags[0]}{$s[3]."|".$s[2]} = 1 unless ($s[2] eq "Ignored");
+				
+			}
 			elsif ($id eq "5007") {
 				my @s = split(/,/,$str);
 				$changes{$s[3]} = 1;
+			}
+# added 20240807
+# https://learn.microsoft.com/en-us/defender-endpoint/troubleshoot-microsoft-defender-antivirus
+			elsif ($id eq "5001") {
+				$disabled{$tags[0]}{"MALWAREPROTECTION_RTP_DISABLED"} = 1;
+			}
+            elsif ($id eq "5004") {
+				my @s = split(/,/,$str);
+				$disabled{$tags[0]}{$s[2]." MALWAREPROTECTION_RTP_FEATURE_CONFIGURED"} = 1;
+			}
+			elsif ($id eq "5012") {
+				$disabled{$tags[0]}{"MALWAREPROTECTION_ANTIVIRUS_DISABLED"} = 1;
+			}
+			elsif ($id eq "5010") {
+				$disabled{$tags[0]}{"MALWAREPROTECTION_ANTISPYWARE_DISABLED"} = 1;
 			}
 			else {}
 		}
@@ -92,18 +129,65 @@ sub pluginmain {
 	
 	if (scalar (keys %detections) > 0) {
 		
-		foreach my $n (reverse sort {$a <=> $b} keys %detections) {
-			printf "%-25s %-10s\n",::format8601Date($n),$detections{$n},
-			
+		print "Detection Events:\n";
+		printf "%-25s %-60s\n","Time","Detection";
+		foreach my $i (reverse sort keys %detections) {
+			foreach my $x (@{$detections{$i}}) {
+				printf "%-25s %-60s\n",::format8601Date($i)."Z",$x;
+			}
 		}
-
 		print "\n";
 		print "Analysis Tip: Defender/1116 & 1117 events are generated when Windows Defender detects/takes action on malware\.\n\n";
 		print "Microsoft-Windows-Windows Defender/1116 - malware detected\n";
 		print "Microsoft-Windows-Windows Defender/1117 - action taken\n";
+		
+		if (scalar (keys %files_1116) > 0) {
+			print "\n";
+			print "Detected Files:\n";
+			foreach my $i (keys %files_1116) {
+				print $i."\n";
+			}	
+		}
 	}
 	else {
-		print "No Defender/1116, 1117 detection events found\.\n";
+		print "No Defender/1116, ../1117 detection events found\.\n";
+	}
+	
+	print "\n";
+	
+	if (scalar (keys %failed) > 0) {
+		print "Windows Defender Failures:\n";
+		foreach my $n (reverse sort {$a <=> $b} keys %failed) {
+			printf "%-25s %-10s\n",::format8601Date($n)."Z",$failed{$n},
+		}
+		print "\n";
+		print "Failed Files:\n";
+		foreach my $i (keys %files_1119) {
+			print $i."\n";
+		}	
+		
+	}
+	else {
+		print "No Defender/1119 failure events found.\n";
+	}
+	
+	print "\n";
+	
+	if (scalar (keys %disabled) > 0) {
+		print "Windows Defender Disabled Features: \n";
+		foreach my $i (reverse sort keys %disabled) {
+			printf "%-25s \n", ::format8601Date($i)."Z";
+			
+			foreach my $r (keys %{$disabled{$i}}) {
+				print "    ".$r."\n";
+			}							
+		}
+		print "\n";
+		print "Analysis Tip: Defender/5001, ../5004, and ../5012 events are generated when attempts are made disable\n";
+		print "Windows Defender capabilities.\n";
+	}
+	else {
+		print "No events indicating Defender disabled features found\.\n";
 	}
 	
 	print "\n";
@@ -126,7 +210,7 @@ sub pluginmain {
 		print "Files that could not be sent by WinDefend:\n";
 		foreach my $i (keys %files) {
 			my @f = split(/\|/,$i,3);
-			printf "%-25s %-50s SHA-256: %-40s\n",$f[0],$f[1],$f[2];
+			printf "%-25s %-50s SHA-256: %-40s\n",::format8601Date($f[0])."Z",$f[1],$f[2];
 		}
 		print "\n";
 		print "Analysis Tip: Defender/2051 events are generated when Defender is unable to upload a sample for categorization\.\n";
@@ -137,6 +221,28 @@ sub pluginmain {
 		print "No Defender/2051 events found\.\n";
 	}
 	print "\n";
+	
+	if (scalar (keys %tamper) > 0) {
+		print "Tamper Attempts: \n";
+		foreach my $i (reverse sort keys %tamper) {
+			printf "%-25s \n", ::format8601Date($i)."Z";
+			
+			foreach my $r (keys %{$tamper{$i}}) {
+				my ($w, $v) = split(/\|/,$r);
+				print "    ".$w." : ".$v."\n";
+			}				
+			
+		}
+		print "\n";
+		print "Analysis Tip: Defender/5013 events are generated when attempts are made to modify Windows Defender with Tamper\n";
+		print "Protection enabled.\n";
+		print "Tamper attempts marked \"Ignored\" by Windows Defender are NOT included\.\n";
+	}
+	else {
+		print "No Defender/5013 events found\.\n";
+	}
+	print "\n";
+	
 	
 	if (scalar (keys %changes) > 0) {
 		print "Modifications to Windows Defender:\n";
